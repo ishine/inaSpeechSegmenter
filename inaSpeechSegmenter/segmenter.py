@@ -40,7 +40,7 @@ from sidekit.frontend.io import read_wav
 from sidekit.frontend.features import mfcc
 
 from pyannote.algorithms.utils.viterbi import viterbi_decoding
-from .viterbi_utils import log_trans_exp, pred2logemission
+from .viterbi_utils import pred2logemission, diag_trans_exp, log_trans_exp
 
 
 def _wav2feats(wavname):
@@ -80,36 +80,6 @@ def _get_patches(mspec, w, step):
     return data, finite
 
 
-def _speechzic(nn, patches, finite_patches, vad):
-    ret = []
-    for lab, start, stop in _binidx2seglist(vad):
-        if lab == 0:
-            # no energy
-            ret.append(('NOACTIVITY', start, stop))
-            continue
-        #print(start, stop)
-        rawpred = nn.predict(patches[start:stop, :])
-        rawpred[finite_patches[start:stop] == False, :] = 0.5
-        pred = viterbi_decoding(np.log(rawpred), log_trans_exp(150))
-        for lab2, start2, stop2 in _binidx2seglist(pred):
-            ret.append((['Speech', 'Music'][int(lab2)], start2+start, stop2+start))
-    return ret
-
-
-def _gender(nn, patches, finite_patches, speechzicseg):
-    ret = []
-    for lab, start, stop in speechzicseg:
-        if lab in ['Music', 'NOACTIVITY']:
-            # no energy
-            ret.append((lab, start, stop))
-            continue
-        rawpred = nn.predict(patches[start:stop, :])
-        rawpred[finite_patches[start:stop] == False, :] = 0.5
-        pred = viterbi_decoding(np.log(rawpred), log_trans_exp(80))
-        for lab2, start2, stop2 in _binidx2seglist(pred):
-            ret.append((['Female', 'Male'][int(lab2)], start2+start, stop2+start))
-    return ret
-
 def _binidx2seglist(binidx):
     """
     ss._binidx2seglist((['f'] * 5) + (['bbb'] * 10) + ['v'] * 5)
@@ -130,18 +100,122 @@ def _binidx2seglist(binidx):
     return ret
 
 
+class DnnSegmenter:
+    """
+    DnnSegmenter is an abstract class allowing to perform Dnn-based
+    segmentation using Keras serialized models using 24 mel spectrogram
+    features obtained with SIDEKIT framework.
+
+    Child classes MUST define the following class attributes:
+    * nmel: the number of mel bands to used (max: 24)
+    * viterbi_arg: the argument to be used with viterbi post-processing
+    * model_fname: the filename of the serialized keras model to be used
+        the model should be stored in the current directory
+    * inlabel: only segments with label name inlabel will be analyzed.
+        other labels will stay unchanged
+    * outlabels: the labels associated the output of neural network models
+    """
+    def __init__(self):
+        # load the DNN model
+        p = os.path.dirname(os.path.realpath(__file__)) + '/'
+        self.nn = keras.models.load_model(p + self.model_fname, compile=False)        
+    
+    def __call__(self, mspec, lseg, difflen = 0):
+        """
+        *** input
+        * mspec: mel spectrogram
+        * lseg: list of tuples (label, start, stop) corresponding to previous segmentations
+        * difflen: 0 if the original length of the mel spectrogram is >= 68
+                otherwise it is set to 68 - length(mspec)
+        *** output
+        a list of adjacent tuples (label, start, stop)
+        """
+
+        if self.nmel < 24:
+            mspec = mspec[:, :self.nmel].copy()
+        
+        patches, finite = _get_patches(mspec, 68, 2)
+        if difflen > 0:
+            patches = patches[:-int(difflen / 2), :, :]
+            finite = finite[:-int(difflen / 2)]
+            
+        assert len(finite) == len(patches), (len(patches), len(finite))
+            
+        ret = []
+        for lab, start, stop in lseg:
+            if lab != self.inlabel:
+                ret.append((lab, start, stop))
+                continue
+
+            rawpred = self.nn.predict(patches[start:stop, :])
+            rawpred[finite[start:stop] == False, :] = 0.5
+
+            pred = viterbi_decoding(np.log(rawpred), diag_trans_exp(self.viterbi_arg, len(self.outlabels)))
+            for lab2, start2, stop2 in _binidx2seglist(pred):
+                ret.append((self.outlabels[int(lab2)], start2+start, stop2+start))            
+        return ret
+
+
+class SpeechMusic(DnnSegmenter):
+    # Voice activity detection: requires energetic activity detection
+    outlabels = ('speech', 'music')
+    model_fname = 'keras_speech_music_cnn.hdf5'
+    inlabel = 'energy'
+    nmel = 21
+    viterbi_arg = 150
+
+class SpeechMusicNoise(DnnSegmenter):
+    # Voice activity detection: requires energetic activity detection
+    outlabels = ('speech', 'music', 'noise')
+    model_fname = 'keras_speech_music_noise_cnn.hdf5'
+    inlabel = 'energy'
+    nmel = 21
+    viterbi_arg = 80
+    
+class Gender(DnnSegmenter):
+    # Gender Segmentation, requires voice activity detection
+    outlabels = ('female', 'male')
+    model_fname = 'keras_male_female_cnn.hdf5'
+    inlabel = 'speech'
+    nmel = 24
+    viterbi_arg = 80
+
 
 class Segmenter:
-    def __init__(self):
+    def __init__(self, vad_engine='smn', detect_gender=True, ffmpeg='ffmpeg'):
         """
         Load neural network models
-        """
-        p = os.path.dirname(os.path.realpath(__file__)) + '/'
-        self.sznn = keras.models.load_model(p + 'keras_speech_music_cnn.hdf5', compile=False)
-        self.gendernn = keras.models.load_model(p + 'keras_male_female_cnn.hdf5', compile=False)
+        
+        Input:
 
+        'vad_engine' can be 'sm' (speech/music) or 'smn' (speech/music/noise)
+                'sm' was used in the results presented in ICASSP 2017 paper
+                        and in MIREX 2018 challenge submission
+                'smn' has been implemented more recently and has not been evaluated in papers
+        
+        'detect_gender': if False, speech excerpts are return labelled as 'speech'
+                if True, speech excerpts are splitted into 'male' and 'female' segments
+        """      
 
-    
+        # test ffmpeg installation
+        if shutil.which(ffmpeg) is None:
+            raise(Exception("""ffmpeg program not found"""))
+        self.ffmpeg = ffmpeg
+
+        # select speech/music or speech/music/noise voice activity detection engine
+        assert vad_engine in ['sm', 'smn']
+        if vad_engine == 'sm':
+            self.vad = SpeechMusic()
+        elif vad_engine == 'smn':
+            self.vad = SpeechMusicNoise()
+
+        # load gender detection NN if required
+        assert detect_gender in [True, False]
+        self.detect_gender = detect_gender
+        if detect_gender:
+            self.gender = Gender()
+            
+
     def segmentwav(self, wavname):
         """
         do segmentation
@@ -161,40 +235,36 @@ class Segmenter:
 
 
         # perform energy-based activity detection
-        vad = _energy_activity(loge)[::2]
-        
-        # perform speech/music segmentation using only 21 MFC coefficients
-        data21, finite = _get_patches(mspec[:, :21].copy(), 68, 2)
-        if difflen > 0:
-            data21 = data21[:-int(difflen/2), :, :]
-            finite = finite[:-int(difflen/2)]
-        assert len(data21) == len(vad), (len(data21), len(vad))
-        assert len(finite) == len(data21), (len(data21), len(finite))
-        szseg = _speechzic(self.sznn, data21, finite, vad)
-        
-        data, finite = _get_patches(mspec, 68, 2)
-        if difflen > 0:
-            data = data[:-int(difflen/2), :, :]
-            finite = finite[:-int(difflen/2)]        
-        genderseg = _gender(self.gendernn, data, finite, szseg)
-        # TODO: OFFSET MANAGEMENT
-        return [(lab, start * .02, stop * .02) for lab, start, stop in genderseg]
+        lseg = []
+        for lab, start, stop in _binidx2seglist(_energy_activity(loge)[::2]):
+            if lab == 0:
+                lab = 'noEnergy'
+            else:
+                lab = 'energy'
+            lseg.append((lab, start, stop))
 
-    def __call__(self, medianame, ffmpeg='ffmpeg', tmpdir=None):
+        # perform voice activity detection
+        lseg = self.vad(mspec, lseg, difflen)
+
+        # perform gender segmentation on speech segments
+        if self.detect_gender:
+            lseg = self.gender(mspec, lseg, difflen)
+
+        # TODO: OFFSET MANAGEMENT
+        return [(lab, start * .02, stop * .02) for lab, start, stop in lseg]
+
+
+    def __call__(self, medianame, tmpdir=None):
         """
         do segmentation on any kind on media file, including urls
         slower than segmentwav method
         """
-
-        # TODO: move this to init
-        if shutil.which(ffmpeg) is None:
-            raise(Exception("""ffmpeg program not found"""))
         
         base, _ = os.path.splitext(os.path.basename(medianame))
 
         with tempfile.TemporaryDirectory(dir=tmpdir) as tmpdirname:
             tmpwav = tmpdirname + '/' + base + '.wav'
-            args = [ffmpeg, '-y', '-i', medianame, '-ar', '16000', '-ac', '1', tmpwav]
+            args = [self.ffmpeg, '-y', '-i', medianame, '-ar', '16000', '-ac', '1', tmpwav]
             p = Popen(args, stdout=PIPE, stderr=PIPE)
             output, error = p.communicate()
             assert p.returncode == 0, error
