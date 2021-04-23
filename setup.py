@@ -41,7 +41,8 @@ speaker-gender
 speech
 music
 noise
-voice-activity-detection'''.strip().split('\n')
+voice-activity-detection
+praat'''.strip().split('\n')
 
 CLASSIFIERS=[
     'Development Status :: 3 - Alpha',
@@ -92,13 +93,13 @@ Details on the speech detection submodule can be found bellow:
 
 setup(
     name = "inaSpeechSegmenter",
-    version = "0.3.3",
+    version = "0.6.7",
     author = "David Doukhan",
     author_email = "david.doukhan@gmail.com",
     test_suite="run_tests.py",
     description = DESCRIPTION,
     license = "MIT",
-    install_requires=['numpy', 'keras', 'scikit-image', 'sidekit==1.2.4', 'pyannote.algorithms'],
+    install_requires=['numpy', 'pandas', 'keras', 'scikit-image', 'pyannote.algorithms', 'pyannote.core', 'pyannote.parser', 'matplotlib', 'Pyro4', 'pytextgrid', 'soundfile'],
  #   keywords = "example documentation tutorial",
     url = "https://github.com/ina-foss/inaSpeechSegmenter",
 #    packages=['inaSpeechSegmenter'],
@@ -110,7 +111,7 @@ setup(
     long_description=LONGDESCRIPTION,
     long_description_content_type='text/markdown',
     scripts=[os.path.join('scripts', script) for script in \
-             ['ina_speech_segmenter.py']],
+             ['ina_speech_segmenter.py', 'ina_speech_segmenter_pyro_client.py', 'ina_speech_segmenter_pyro_server.py', 'ina_speech_segmenter_pyro_client_setjobs.py']],
     classifiers=CLASSIFIERS,
-    python_requires='>=3',
+    python_requires='>=3.6',
 )

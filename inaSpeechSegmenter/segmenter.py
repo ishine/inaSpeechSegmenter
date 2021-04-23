@@ -25,39 +25,25 @@
 
 
 import os
-import tempfile
-from subprocess import Popen, PIPE
+import sys
+
 import numpy as np
 import keras
+from .thread_returning import ThreadReturning
+
 import shutil
-import pandas as pd
-import warnings
+import time
+import random
 
 from skimage.util import view_as_windows as vaw
 
-os.environ['SIDEKIT'] = 'theano=false,libsvm=false'
-from sidekit.frontend.io import read_wav
-from sidekit.frontend.features import mfcc
 
 from pyannote.algorithms.utils.viterbi import viterbi_decoding
 from .viterbi_utils import pred2logemission, diag_trans_exp, log_trans_exp
 
+from .features import media2feats
+from .export_funcs import seg2csv, seg2textgrid
 
-def _wav2feats(wavname):
-    """ 
-    """
-    ext = os.path.splitext(wavname)[-1]
-    assert ext.lower() == '.wav' or ext.lower() == '.wave'
-    sig, read_framerate, sampwidth = read_wav(wavname)
-    shp = sig.shape
-    # wav should contain a single channel
-    assert len(shp) == 1 or (len(shp) == 2 and shp[1] == 1)
-    # wav sample rate should be 16000 Hz
-    assert read_framerate == 16000
-    assert sampwidth == 2
-    sig *= (2**(15-sampwidth))
-    _, loge, _, mspec = mfcc(sig.astype(np.float32), get_mspec=True)
-    return mspec, loge
 
 
 def _energy_activity(loge, ratio=0.03):
@@ -115,11 +101,12 @@ class DnnSegmenter:
         other labels will stay unchanged
     * outlabels: the labels associated the output of neural network models
     """
-    def __init__(self):
+    def __init__(self, batch_size):
         # load the DNN model
         p = os.path.dirname(os.path.realpath(__file__)) + '/'
         self.nn = keras.models.load_model(p + self.model_fname, compile=False)        
-    
+        self.batch_size = batch_size
+        
     def __call__(self, mspec, lseg, difflen = 0):
         """
         *** input
@@ -141,16 +128,26 @@ class DnnSegmenter:
             
         assert len(finite) == len(patches), (len(patches), len(finite))
             
+        batch = []
+        for lab, start, stop in lseg:
+            if lab == self.inlabel:
+                batch.append(patches[start:stop, :])
+
+        if len(batch) > 0:
+            batch = np.concatenate(batch)
+            rawpred = self.nn.predict(batch, batch_size=self.batch_size)
+
         ret = []
         for lab, start, stop in lseg:
             if lab != self.inlabel:
                 ret.append((lab, start, stop))
                 continue
 
-            rawpred = self.nn.predict(patches[start:stop, :])
-            rawpred[finite[start:stop] == False, :] = 0.5
-
-            pred = viterbi_decoding(np.log(rawpred), diag_trans_exp(self.viterbi_arg, len(self.outlabels)))
+            l = stop - start
+            r = rawpred[:l] 
+            rawpred = rawpred[l:]
+            r[finite[start:stop] == False, :] = 0.5
+            pred = viterbi_decoding(np.log(r), diag_trans_exp(self.viterbi_arg, len(self.outlabels)))
             for lab2, start2, stop2 in _binidx2seglist(pred):
                 ret.append((self.outlabels[int(lab2)], start2+start, stop2+start))            
         return ret
@@ -182,7 +179,7 @@ class Gender(DnnSegmenter):
 
 
 class Segmenter:
-    def __init__(self, vad_engine='smn', detect_gender=True, ffmpeg='ffmpeg'):
+    def __init__(self, vad_engine='smn', detect_gender=True, ffmpeg='ffmpeg', batch_size=32):
         """
         Load neural network models
         
@@ -202,36 +199,31 @@ class Segmenter:
             raise(Exception("""ffmpeg program not found"""))
         self.ffmpeg = ffmpeg
 
+#        self.graph = KB.get_session().graph # To prevent the issue of keras with tensorflow backend for async tasks
+
+        
         # select speech/music or speech/music/noise voice activity detection engine
         assert vad_engine in ['sm', 'smn']
         if vad_engine == 'sm':
-            self.vad = SpeechMusic()
+            self.vad = SpeechMusic(batch_size)
         elif vad_engine == 'smn':
-            self.vad = SpeechMusicNoise()
+            self.vad = SpeechMusicNoise(batch_size)
 
         # load gender detection NN if required
         assert detect_gender in [True, False]
         self.detect_gender = detect_gender
         if detect_gender:
-            self.gender = Gender()
-            
+            self.gender = Gender(batch_size)
 
-    def segmentwav(self, wavname):
+
+    def segment_feats(self, mspec, loge, difflen, start_sec):
         """
         do segmentation
         require input corresponding to wav file sampled at 16000Hz
         with a single channel
         """
-        # Get Mel Power Spectrogram and Energy
-        mspec, loge = _wav2feats(wavname)
 
-        # Management of short duration segments
-        difflen = 0
-        if len(loge) < 68:
-            difflen = 68 - len(loge)
-            warnings.warn("media %s duration is short. Robust results require length of at least 720 milliseconds" %wavname)
-            mspec = np.concatenate((mspec, np.ones((difflen, 24)) * np.min(mspec)))
-            #loge = np.concatenate((loge, np.ones(difflen) * np.min(mspec)))
+
 
 
         # perform energy-based activity detection
@@ -250,27 +242,123 @@ class Segmenter:
         if self.detect_gender:
             lseg = self.gender(mspec, lseg, difflen)
 
-        # TODO: OFFSET MANAGEMENT
-        return [(lab, start * .02, stop * .02) for lab, start, stop in lseg]
+        return [(lab, start_sec + start * .02, start_sec + stop * .02) for lab, start, stop in lseg]
 
 
-    def __call__(self, medianame, tmpdir=None):
+    def __call__(self, medianame, tmpdir=None, start_sec=None, stop_sec=None):
         """
-        do segmentation on any kind on media file, including urls
-        slower than segmentwav method
+        Return segmentation of a given file
+                * convert file to wav 16k mono with ffmpeg
+                * call NN segmentation procedures
+        * media_name: path to the media to be processed (including remote url)
+                may include any format supported by ffmpeg
+        * tmpdir: allow to define a custom path for storing temporary files
+                fast read/write HD are a good choice
+        * start_sec (seconds): sound stream before start_sec won't be processed
+        * stop_sec (seconds): sound stream after stop_sec won't be processed
         """
         
-        base, _ = os.path.splitext(os.path.basename(medianame))
+        mspec, loge, difflen = media2feats(medianame, tmpdir, start_sec, stop_sec, self.ffmpeg)
+        if start_sec is None:
+            start_sec = 0
+        # do segmentation   
+        return self.segment_feats(mspec, loge, difflen, start_sec)
 
-        with tempfile.TemporaryDirectory(dir=tmpdir) as tmpdirname:
-            tmpwav = tmpdirname + '/' + base + '.wav'
-            args = [self.ffmpeg, '-y', '-i', medianame, '-ar', '16000', '-ac', '1', tmpwav]
-            p = Popen(args, stdout=PIPE, stderr=PIPE)
-            output, error = p.communicate()
-            assert p.returncode == 0, error
-            return self.segmentwav(tmpwav)
+    
+    def batch_process(self, linput, loutput, tmpdir=None, verbose=False, skipifexist=False, nbtry=1, trydelay=2., output_format='csv'):
+        
+        if verbose:
+            print('batch_processing %d files' % len(linput))
 
-def seg2csv(lseg, fout=None):
-    df = pd.DataFrame.from_records(lseg, columns=['labels', 'start', 'stop'])
-    df.to_csv(fout, sep='\t', index=False)
+        if output_format == 'csv':
+            fexport = seg2csv
+        elif output_format == 'textgrid':
+            fexport = seg2textgrid
+        else:
+            raise NotImplementedError()
+            
+        t_batch_start = time.time()
+        
+        lmsg = []
+        fg = featGenerator(linput.copy(), loutput.copy(), tmpdir, self.ffmpeg, skipifexist, nbtry, trydelay)
+        i = 0
+        for feats, msg in fg:
+            lmsg += msg
+            i += len(msg)
+            if verbose:
+                print('%d/%d' % (i, len(linput)), msg)
+            if feats is None:
+                break
+            mspec, loge, difflen = feats
+            #if verbose == True:
+            #    print(i, linput[i], loutput[i])
+            b = time.time()
+            lseg = self.segment_feats(mspec, loge, difflen, 0)
+            fexport(lseg, loutput[len(lmsg) -1])
+            lmsg[-1] = (lmsg[-1][0], lmsg[-1][1], 'ok ' + str(time.time() -b))
 
+        t_batch_dur = time.time() - t_batch_start
+        nb_processed = len([e for e in lmsg if e[1] == 0])
+        if nb_processed > 0:
+            avg = t_batch_dur / nb_processed
+        else:
+            avg = -1
+        return t_batch_dur, nb_processed, avg, lmsg
+
+
+def medialist2feats(lin, lout, tmpdir, ffmpeg, skipifexist, nbtry, trydelay):
+    """
+    To be used when processing batches
+    if resulting file exists, it is skipped
+    in case of remote files, access is tried nbtry times
+    """
+    ret = None
+    msg = []
+    while ret is None and len(lin) > 0:
+        src = lin.pop(0)
+        dst = lout.pop(0)
+#        print('popping', src)
+        
+        # if file exists: skipp
+        if skipifexist and os.path.exists(dst):
+            msg.append((dst, 1, 'already exists'))
+            continue
+
+        # create storing directory if required
+        dname = os.path.dirname(dst)
+        if not os.path.isdir(dname):
+            os.makedirs(dname)
+        
+        itry = 0
+        while ret is None and itry < nbtry:
+            try:
+                ret = media2feats(src, tmpdir, None, None, ffmpeg)
+            except:
+                itry += 1
+                errmsg = sys.exc_info()[0]
+                if itry != nbtry:
+                    time.sleep(random.random() * trydelay)
+        if ret is None:
+            msg.append((dst, 2, 'error: ' + str(errmsg)))
+        else:
+            msg.append((dst, 0, 'ok'))
+            
+    return ret, msg
+
+    
+def featGenerator(ilist, olist, tmpdir=None, ffmpeg='ffmpeg', skipifexist=False, nbtry=1, trydelay=2.):
+#    print('init feat gen', len(ilist))
+    thread = ThreadReturning(target = medialist2feats, args=[ilist, olist, tmpdir, ffmpeg, skipifexist, nbtry, trydelay])
+    thread.start()
+    while True:
+        ret, msg = thread.join()
+#        print('join done', len(ilist))
+#        print('new list', ilist)
+        #ilist = ilist[len(msg):]
+        #olist = olist[len(msg):]
+        if len(ilist) == 0:
+            break
+        thread = ThreadReturning(target = medialist2feats, args=[ilist, olist, tmpdir, ffmpeg, skipifexist, nbtry, trydelay])
+        thread.start()
+        yield ret, msg
+    yield ret, msg
