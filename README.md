@@ -1,4 +1,8 @@
 # inaSpeechSegmenter
+[![Python](https://img.shields.io/pypi/pyversions/inaSpeechSegmenter.svg?style=plastic)](https://badge.fury.io/py/inaSpeechSegmenter)
+[![Python 3.7 to 3.10 unit tests](https://github.com/ina-foss/inaSpeechSegmenter/actions/workflows/python-package.yml/badge.svg)](https://github.com/ina-foss/inaSpeechSegmenter/actions/workflows/python-package.yml)
+[![PyPI version](https://badge.fury.io/py/inaSpeechSegmenter.svg)](https://badge.fury.io/py/inaSpeechSegmenter)
+[![Docker Pulls](https://img.shields.io/docker/pulls/inafoss/inaspeechsegmenter)](https://hub.docker.com/r/inafoss/inaspeechsegmenter)
 
 inaSpeechSegmenter is a CNN-based audio segmentation toolkit.
 
@@ -6,15 +10,17 @@ inaSpeechSegmenter is a CNN-based audio segmentation toolkit.
 It splits audio signals into homogeneous zones of speech, music and noise.
 Speech zones are split into segments tagged using speaker gender (male or female).
 Male and female classification models are optimized for French language since they were trained using French speakers (accoustic correlates of speaker gender are language dependent).
-Zones corresponding to speech over music or speech over noise are tagged as speech.
+Zones corresponding to speech over music or speech over noise are tagged as speech. 
 
 
 inaSpeechSegmenter has been designed in order to perform [large-scale gender equality studies](http://doi.org/10.18146/2213-0969.2018.jethc156) based on men and women speech-time percentage estimation.
 
 ## Installation
 
-inaSpeechSegmenter is a framework in python 3. Only python versions greater or equal to 3.6 are supported.
-It can be installed using the following procedure:
+inaSpeechSegmenter works with Python 3.7 to Python 3.10. It is based on Tensorflow which does not yet support Python 3.11+.
+
+It is available on Python Package Index [inaSpeechSegmenter](https://pypi.org/project/inaSpeechSegmenter/) and packaged as a docker image [inafoss/inaspeechsegmenter](https://hub.docker.com/r/inafoss/inaspeechsegmenter).
+
 
 ### Prerequisites
 
@@ -23,12 +29,12 @@ Installation of ffmpeg for ubuntu can be done using the following commandline:
 ```bash
 $ sudo apt-get install ffmpeg
 ```
+
 ### PIP installation
-Simplest installation procedure which downloads everything
 ```bash
 # create a python 3 virtual environement and activate it
-$ virtualenv -p python3 inaSpeechSegEnv
-$ source inaSpeechSegEnv/bin/activate
+$ virtualenv -p python3 env
+$ source env/bin/activate
 # install framework and dependencies
 $ pip install inaSpeechSegmenter
 ```
@@ -39,8 +45,8 @@ $ pip install inaSpeechSegmenter
 # clone git repository
 $ git clone https://github.com/ina-foss/inaSpeechSegmenter.git
 # create a python 3 virtual environement and activate it
-$ virtualenv -p python3 inaSpeechSegEnv
-$ source inaSpeechSegEnv/bin/activate
+$ virtualenv -p python3 env
+$ source env/bin/activate
 # install framework and dependencies
 # you should use pip instead of setup.py for installing from source
 $ cd inaSpeechSegmenter
@@ -86,7 +92,10 @@ gender detection framework for monitoring gender equality. In 2018 IEEE Internat
 ```
 ### Using Speech Segmentation API
 
-InaSpeechSegmentation API is intended to be very simple to use.
+InaSpeechSegmentation API is intended to be very simple to use, and is illustrated by these 2 notebooks :
+* [Google colab tutorial](https://colab.research.google.com/github/ina-foss/inaSpeechSegmenter/blob/master/tutorials/Demo_INASPeechSegmenter.ipynb): use API online
+* [Jupyter notebook tutorial](tutorials/API_Tutorial.ipynb) : to be used offline
+
 The class allowing to perform segmentations is called Segmenter.
 It is the only class that you need to import in a program.
 Class constructor accept 3 optional arguments:
@@ -97,7 +106,6 @@ Class constructor accept 3 optional arguments:
 * ffmpeg: allows to provide a specific binary of ffmpeg instead of default system installation
 
 
-See the following notebook for a comprehensive example: [API Tutorial Here!](API_Tutorial.ipynb)
 
 ## Citing
 
@@ -131,10 +139,7 @@ Details on the speech detection submodule can be found bellow:
 
 ## CREDITS
 
-This work was realized in the framework of MeMAD project.
-https://memad.eu/
-MeMAD is an EU funded H2020 research project.
-It has received funding from the European Union’s Horizon 2020 research and innovation programme under grant agreement No 780069.
+This work has been partially funded by the French National Research Agency (project GEM : Gender Equality Monitor : ANR-19-CE38-0012) and by European Union's Horizon 2020 research and innovation programme (project [MeMAD](https://memad.eu) : H2020 grant agreement No 780069).
 
 Some optimization within inaSpeechSegmenter code were realized by Cyril Lashkevich
 https://github.com/notorca

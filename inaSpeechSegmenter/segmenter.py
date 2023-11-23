@@ -29,22 +29,42 @@ import sys
 
 import numpy as np
 from tensorflow import keras
+from tensorflow.keras.utils import get_file
 from .thread_returning import ThreadReturning
 
 import shutil
 import time
 import random
+import gc
 
 from skimage.util import view_as_windows as vaw
 
 
-from pyannote.algorithms.utils.viterbi import viterbi_decoding
+from .pyannote_viterbi import viterbi_decoding
 from .viterbi_utils import pred2logemission, diag_trans_exp, log_trans_exp
+from .remote_utils import get_remote
 
-from .features import media2feats
+from .io import media2sig16kmono
+from .sidekit_mfcc import mfcc
+import warnings
+
 from .export_funcs import seg2csv, seg2textgrid
 
+def _media2feats(medianame, tmpdir, start_sec, stop_sec, ffmpeg):
+    sig = media2sig16kmono(medianame, tmpdir, start_sec, stop_sec, ffmpeg, 'float32')
+    with warnings.catch_warnings():
+        # ignore warnings resulting from empty signals parts
+        warnings.filterwarnings('ignore', message='divide by zero encountered in log', category=RuntimeWarning)
+        _, loge, _, mspec = mfcc(sig.astype(np.float32), get_mspec=True)
 
+    # Management of short duration segments
+    difflen = 0
+    if len(loge) < 68:
+        difflen = 68 - len(loge)
+        warnings.warn("media %s duration is short. Robust results require length of at least 720 milliseconds" % medianame)
+        mspec = np.concatenate((mspec, np.ones((difflen, 24)) * np.min(mspec)))
+
+    return mspec, loge, difflen
 
 def _energy_activity(loge, ratio):
     threshold = np.mean(loge[np.isfinite(loge)]) + np.log(ratio)
@@ -103,10 +123,14 @@ class DnnSegmenter:
     """
     def __init__(self, batch_size):
         # load the DNN model
-        p = os.path.dirname(os.path.realpath(__file__)) + '/'
-        self.nn = keras.models.load_model(p + self.model_fname, compile=False)        
+        url = 'https://github.com/ina-foss/inaSpeechSegmenter/releases/download/models/'
+
+        model_path = get_remote(self.model_fname)
+
+        self.nn = keras.models.load_model(model_path, compile=False)
+        self.nn.run_eagerly = False
         self.batch_size = batch_size
-        
+
     def __call__(self, mspec, lseg, difflen = 0):
         """
         *** input
@@ -135,8 +159,9 @@ class DnnSegmenter:
 
         if len(batch) > 0:
             batch = np.concatenate(batch)
-            rawpred = self.nn.predict(batch, batch_size=self.batch_size)
-
+            rawpred = self.nn.predict(batch, batch_size=self.batch_size, verbose=2)
+        gc.collect()
+            
         ret = []
         for lab, start, stop in lseg:
             if lab != self.inlabel:
@@ -192,14 +217,16 @@ class Segmenter:
         
         'detect_gender': if False, speech excerpts are return labelled as 'speech'
                 if True, speech excerpts are splitted into 'male' and 'female' segments
+
+        'batch_size' : large values of batch_size (ex: 1024) allow faster processing times.
+                They also require more memory on the GPU.
+                default value (32) is slow, but works on any hardware
         """      
 
         # test ffmpeg installation
         if shutil.which(ffmpeg) is None:
             raise(Exception("""ffmpeg program not found"""))
         self.ffmpeg = ffmpeg
-
-#        self.graph = KB.get_session().graph # To prevent the issue of keras with tensorflow backend for async tasks
 
         # set energic ratio for 1st VAD
         self.energy_ratio = energy_ratio
@@ -260,7 +287,7 @@ class Segmenter:
         * stop_sec (seconds): sound stream after stop_sec won't be processed
         """
         
-        mspec, loge, difflen = media2feats(medianame, tmpdir, start_sec, stop_sec, self.ffmpeg)
+        mspec, loge, difflen = _media2feats(medianame, tmpdir, start_sec, stop_sec, self.ffmpeg)
         if start_sec is None:
             start_sec = 0
         # do segmentation   
@@ -319,8 +346,7 @@ def medialist2feats(lin, lout, tmpdir, ffmpeg, skipifexist, nbtry, trydelay):
     while ret is None and len(lin) > 0:
         src = lin.pop(0)
         dst = lout.pop(0)
-#        print('popping', src)
-        
+
         # if file exists: skipp
         if skipifexist and os.path.exists(dst):
             msg.append((dst, 1, 'already exists'))
@@ -334,7 +360,7 @@ def medialist2feats(lin, lout, tmpdir, ffmpeg, skipifexist, nbtry, trydelay):
         itry = 0
         while ret is None and itry < nbtry:
             try:
-                ret = media2feats(src, tmpdir, None, None, ffmpeg)
+                ret = _media2feats(src, tmpdir, None, None, ffmpeg)
             except:
                 itry += 1
                 errmsg = sys.exc_info()[0]
@@ -349,15 +375,10 @@ def medialist2feats(lin, lout, tmpdir, ffmpeg, skipifexist, nbtry, trydelay):
 
     
 def featGenerator(ilist, olist, tmpdir=None, ffmpeg='ffmpeg', skipifexist=False, nbtry=1, trydelay=2.):
-#    print('init feat gen', len(ilist))
     thread = ThreadReturning(target = medialist2feats, args=[ilist, olist, tmpdir, ffmpeg, skipifexist, nbtry, trydelay])
     thread.start()
     while True:
         ret, msg = thread.join()
-#        print('join done', len(ilist))
-#        print('new list', ilist)
-        #ilist = ilist[len(msg):]
-        #olist = olist[len(msg):]
         if len(ilist) == 0:
             break
         thread = ThreadReturning(target = medialist2feats, args=[ilist, olist, tmpdir, ffmpeg, skipifexist, nbtry, trydelay])

@@ -26,7 +26,7 @@
 
 import os
 from setuptools import setup, find_packages
-
+import versioneer
 
 KEYWORDS = '''
 speech-segmentation
@@ -45,18 +45,26 @@ voice-activity-detection
 praat'''.strip().split('\n')
 
 CLASSIFIERS=[
-    'Development Status :: 3 - Alpha',
+    'Development Status :: 4 - Beta',
     'Intended Audience :: Developers',
     'Intended Audience :: Education',
     'Intended Audience :: Science/Research',
     'License :: OSI Approved :: MIT License',
     'Operating System :: OS Independent',
     'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3 :: Only',
+    'Programming Language :: Python :: 3.7',
+    'Programming Language :: Python :: 3.8',
+    'Programming Language :: Python :: 3.9',
+    'Programming Language :: Python :: 3.10',
     'Topic :: Multimedia :: Sound/Audio',
     'Topic :: Multimedia :: Sound/Audio :: Analysis',
     'Topic :: Multimedia :: Sound/Audio :: Speech',
     'Topic :: Scientific/Engineering',
     'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    'Topic :: Software Development',
+    'Topic :: Software Development :: Libraries',
+    'Topic :: Software Development :: Libraries :: Python Modules',
     'Topic :: Sociology',
 ]
 
@@ -93,19 +101,19 @@ Details on the speech detection submodule can be found bellow:
 
 setup(
     name = "inaSpeechSegmenter",
-    version = "0.6.9",
+    version = versioneer.get_version(),
+    cmdclass = versioneer.get_cmdclass(),
     author = "David Doukhan",
     author_email = "david.doukhan@gmail.com",
-    test_suite="run_tests.py",
+    test_suite="run_test.py",
     description = DESCRIPTION,
     license = "MIT",
-    install_requires=['tensorflow', 'numpy', 'pandas', 'scikit-image', 'pyannote.algorithms', 'pyannote.core', 'pyannote.parser', 'matplotlib', 'Pyro4', 'pytextgrid', 'soundfile'],
+    install_requires=['tensorflow', 'numpy', 'pandas', 'scikit-image', 'pyannote.core', 'matplotlib', 'Pyro4', 'pytextgrid', 'soundfile', 'onnxruntime-gpu'], #'torch'
  #   keywords = "example documentation tutorial",
     url = "https://github.com/ina-foss/inaSpeechSegmenter",
 #    packages=['inaSpeechSegmenter'],
     keywords = KEYWORDS,
     packages = find_packages(),
-    package_data = {'inaSpeechSegmenter': ['*.hdf5']},
     include_package_data = True,
     data_files = ['LICENSE'],
     long_description=LONGDESCRIPTION,
